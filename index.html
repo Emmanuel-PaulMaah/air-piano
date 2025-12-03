@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Synth + Hand Control</title>
+  <style>
+    body {
+      background: black;
+      color: white;
+      text-align: center;
+      font-family: sans-serif;
+    }
+    .key {
+      display: inline-block;
+      margin: 5px;
+      padding: 20px;
+      border: 2px solid white;
+      border-radius: 5px;
+      min-width: 40px;
+    }
+    .active {
+      background: yellow;
+      color: black;
+    }
+    #video-container {
+      margin-top: 20px;
+      display: inline-block;
+      position: relative;
+    }
+    #output {
+      border: 1px solid #444;
+    }
+    #startBtn {
+      margin-top: 10px;
+      padding: 10px 20px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    #hint {
+      margin-top: 10px;
+      font-size: 14px;
+      color: #ccc;
+    }
+  </style>
+
+  <!-- MediaPipe Hands + Camera utils -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+  <h1>Synth</h1>
+  <p>Keyboard: A S D F G H J K L</p>
+  <p>Hands: raise fingers above the horizontal line to trigger notes</p>
+
+  <div id="keys"></div>
+
+  <div>
+    <button id="startBtn">Enable Camera + Hand Control</button>
+    <div id="hint">You must click this button to allow camera and audio.</div>
+  </div>
+
+  <div id="video-container">
+    <video id="webcam" autoplay playsinline style="display:none;"></video>
+    <canvas id="output"></canvas>
+  </div>
+
+  <script>
+    // ===== Audio setup =====
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioCtx();
+
+    const notes = {
+      "A": 261.63, // C4
+      "S": 293.66, // D4
+      "D": 329.63, // E4
+      "F": 349.23, // F4
+      "G": 392.00, // G4
+      "H": 440.00, // A4
+      "J": 493.88, // B4
+      "K": 523.25, // C5
+      "L": 587.33  // D5
+    };
+
+    const keysDiv = document.getElementById("keys");
+    for (let k in notes) {
+      const div = document.createElement("div");
+      div.innerText = k;
+      div.className = "key";
+      keysDiv.appendChild(div);
+    }
+
+    function playNote(freq) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      const now = ctx.currentTime;
+      gain.gain.setValueAtTime(0.0, now);
+      gain.gain.linearRampToValueAtTime(0.5, now + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 1);
+      osc.start(now);
+      osc.stop(now + 1);
+    }
+
+    function flashKey(keyChar) {
+      const keyDivs = document.querySelectorAll(".key");
+      keyDivs.forEach(k => {
+        if (k.innerText === keyChar) {
+          k.classList.add("active");
+          setTimeout(() => k.classList.remove("active"), 150);
+        }
+      });
+    }
+
+    // Keyboard control kept as-is
+    window.addEventListener("keydown", (e) => {
+      const note = notes[e.key.toUpperCase()];
+      if (note) {
+        ctx.resume(); // resume audio context on first key press if needed
+        playNote(note);
+        document.querySelectorAll(".key").forEach(k => {
+          if (k.innerText === e.key.toUpperCase()) k.classList.add("active");
+        });
+      }
+    });
+
+    window.addEventListener("keyup", () => {
+      document.querySelectorAll(".key").forEach(k => k.classList.remove("active"));
+    });
+
+    // ===== MediaPipe Hands setup =====
+    const videoElement = document.getElementById('webcam');
+    const canvasElement = document.getElementById('output');
+    const canvasCtx = canvasElement.getContext('2d');
+
+    // Map finger tip landmark index -> key
+    // 4: thumb, 8: index, 12: middle, 16: ring, 20: pinky
+    const fingerToKey = {
+      4: "A",
+      8: "S",
+      12: "D",
+      16: "F",
+      20: "G"
+    };
+
+    // Track if each finger is currently above the line (to detect crossing)
+    const fingerState = {
+      4: false,
+      8: false,
+      12: false,
+      16: false,
+      20: false
+    };
+
+    // Threshold (normalized 0–1 from top). 0.5 = middle of frame.
+    const thresholdNormalizedY = 0.5;
+
+    function onResults(results) {
+      if (!results.image) return;
+
+      // Match canvas size to image size
+      canvasElement.width = results.image.width;
+      canvasElement.height = results.image.height;
+
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+      // Draw camera frame
+      canvasCtx.drawImage(
+        results.image,
+        0,
+        0,
+        canvasElement.width,
+        canvasElement.height
+      );
+
+      // Draw horizontal threshold line
+      const lineY = canvasElement.height * thresholdNormalizedY;
+      canvasCtx.beginPath();
+      canvasCtx.moveTo(0, lineY);
+      canvasCtx.lineTo(canvasElement.width, lineY);
+      canvasCtx.lineWidth = 2;
+      canvasCtx.strokeStyle = "red";
+      canvasCtx.stroke();
+
+      // Label line
+      canvasCtx.fillStyle = "red";
+      canvasCtx.font = "16px sans-serif";
+      canvasCtx.fillText("Raise finger above this line", 10, lineY - 8);
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        for (const landmarks of results.multiHandLandmarks) {
+          // For each finger tip we care about
+          for (const tipIndex of Object.keys(fingerToKey).map(Number)) {
+            const lm = landmarks[tipIndex];
+            if (!lm) continue;
+
+            const x = lm.x * canvasElement.width;
+            const y = lm.y * canvasElement.height;
+
+            // Draw the fingertip point
+            canvasCtx.beginPath();
+            canvasCtx.arc(x, y, 6, 0, 2 * Math.PI);
+            canvasCtx.fillStyle = "yellow";
+            canvasCtx.fill();
+
+            const isAbove = y < lineY;
+            const wasAbove = fingerState[tipIndex];
+
+            // Trigger note only on state change: below -> above
+            if (isAbove && !wasAbove) {
+              const keyChar = fingerToKey[tipIndex];
+              const freq = notes[keyChar];
+              if (freq) {
+                ctx.resume(); // ensure audio context is active
+                playNote(freq);
+                flashKey(keyChar);
+              }
+            }
+
+            fingerState[tipIndex] = isAbove;
+          }
+        }
+      }
+
+      canvasCtx.restore();
+    }
+
+    // Create MediaPipe Hands instance
+    const hands = new Hands({
+      locateFile: (file) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+      }
+    });
+
+    hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.5
+    });
+
+    hands.onResults(onResults);
+
+    let camera = null;
+
+    async function initCameraAndHands() {
+      // Start audio context due to user gesture requirement
+      await ctx.resume();
+
+      // Use MediaPipe Camera helper
+      camera = new Camera(videoElement, {
+        onFrame: async () => {
+          await hands.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480
+      });
+
+      camera.start();
+    }
+
+    document.getElementById("startBtn").addEventListener("click", () => {
+      initCameraAndHands().catch(err => {
+        console.error("Error starting camera/hands:", err);
+      });
+    });
+  </script>
+</body>
+</html>
